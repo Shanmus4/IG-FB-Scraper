@@ -1,0 +1,16 @@
+{
+  "name": "ig-fb-scraper",
+  "version": "1.0.0",
+  "description": "This script uses Puppeteer to scrape user profiles from Instagram or Facebook.",
+  "main": "scraper.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "inquirer": "^12.7.0",
+    "puppeteer": "^24.11.2"
+  }
+}
