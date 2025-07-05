@@ -47,6 +47,9 @@ To set up and run this project locally, follow these steps:
 - **Robust Auto-Scrolling:** Followers and following dialogs are auto-scrolled to the end, ensuring all users are loaded and extracted (no manual scrolling needed).
 - **Full Data Extraction:** All followers, following, posts, likers, commenters, and tagged posts are extracted automatically.
 - **Login Check:** The script checks if you are logged in after loading the profile. If not, it will warn you and exit.
+- The Instagram HTML report filename is now always generated using the Instagram username (e.g., username_Instagram.html), not the follower count or user ID.
+- Followers and following counts are now shown next to their headings in the HTML report (e.g., 'Followers (1234)').
+- Profile info at the top of the report now always shows the correct posts, followers, and following counts, robustly extracted from the Instagram page.
 
 ## Commands to Run Locally
 

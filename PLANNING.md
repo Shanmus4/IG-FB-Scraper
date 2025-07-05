@@ -45,7 +45,10 @@ Build a Node.js script using Puppeteer to scrape Instagram or Facebook profiles.
     - Generate a single, self-contained HTML file.
     - Clean design with inline CSS.
     - Sections for profile info, followers/friends, and posts.
-    - **The user provides a directory, and the report filename is always automatically set to <userId>_report.html.**
+    - **Instagram HTML report filenames are always generated using the Instagram username (never follower count or user ID).**
+    - **Followers/following extraction uses robust scrolling and selector logic targeting the correct scrollable container and username anchors.**
+    - Followers/following counts are shown next to their headings in the report.
+    - Profile info counts (posts, followers, following) are robustly extracted from the Instagram page.
 5.  **Stealth & Anti-Detection:**
     - Uses Puppeteer Stealth Plugin to avoid detection.
     - Reads User-Agent from a file (`instagram_useragent.txt` or `facebook_useragent.txt`) instead of prompting the user.

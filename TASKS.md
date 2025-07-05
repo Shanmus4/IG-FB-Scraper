@@ -23,6 +23,8 @@
 - `[2025-07-05 | 14:00]` Switch User-Agent to file-based, implement robust auto-scrolling for followers/following, and update all support files and documentation.
 
 ## 🔄 Ongoing
+- [2024-06-09 | 12:00] Fixed Instagram followers/following scrolling and extraction, and ensured report filename uses username, not follower count.
+- [2024-06-09 | 12:30] Improved scrolling wait time, live user count logging, and robust followers/following and profile info counts in the report.
 
 ## 🕓 Pending
 
