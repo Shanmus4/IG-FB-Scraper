@@ -1,0 +1,6 @@
+# Core dependencies for Instagram scraper
+requests>=2.31.0
+python-dotenv>=1.0.1
+
+# Additional dependencies for Facebook scraper (coming soon)
+# Add Facebook-related dependencies here when implemented

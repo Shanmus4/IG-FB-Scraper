@@ -1,6 +1,11 @@
-cookies.txt
-node_modules/
-instagram_cookies.txt
-facebook_cookies.txt
-facebook_useragent.txt
-instagram_useragent.txt
+# Environments
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
