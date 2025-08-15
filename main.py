@@ -18,8 +18,7 @@ def print_header():
 def run_instagram_scraper():
     """Run the Instagram scraper."""
     try:
-        script_path = os.path.join(os.path.dirname(__file__), 'Instagram', 'insta.py')
-        subprocess.run([sys.executable, script_path], check=True)
+        subprocess.run([sys.executable, "Instagram/insta.py"], check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error running Instagram scraper: {e}")
         input("\nPress Enter to continue...")

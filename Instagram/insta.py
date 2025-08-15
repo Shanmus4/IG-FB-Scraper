@@ -651,19 +651,24 @@ def build_html_report(out_path: str, username: str, user_id: str, profile: Dict[
 # ---------------- Main orchestration ----------------
 
 def main():
-    load_dotenv()
+    # Load .env from the same directory as the script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    env_path = os.path.join(script_dir, '.env')
+    load_dotenv(env_path)
+    
     cookie_val = os.getenv("INSTAGRAM_COOKIE")
     if not cookie_val:
         # Fallback: allow .env to contain just the raw cookie string
         try:
-            with open(".env", "r", encoding="utf-8") as f:
+            with open(env_path, "r", encoding="utf-8") as f:
                 raw = f.read().strip()
             if raw:
                 if raw.startswith("INSTAGRAM_COOKIE="):
                     cookie_val = raw.split("=", 1)[1].strip()
                 else:
                     cookie_val = raw
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] Could not read .env file: {e}")
             cookie_val = None
     if not cookie_val:
         print("[ERROR] Instagram cookie not found. Put your full Cookie header in .env (either as raw content or INSTAGRAM_COOKIE=...)")
