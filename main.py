@@ -64,9 +64,11 @@ def run_facebook_scraper():
     try:
         from Facebook.facebook import main as facebook_main
         facebook_main()
+        input("\nPress Enter to return to the main menu.")
         return True
     except Exception as e:
         print(f"\n[!] Error: {str(e)}")
+        input("\nPress Enter to return to the main menu.")
         return False
 
 def main():
