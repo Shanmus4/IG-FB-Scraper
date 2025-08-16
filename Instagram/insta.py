@@ -54,6 +54,13 @@ URL_WEB_PROFILE_INFO = "https://www.instagram.com/api/v1/users/web_profile_info/
 
 # ---------------- Helpers ----------------
 
+def sanitize_filename(name: str) -> str:
+    """Sanitize a filename for Windows by replacing illegal characters."""
+    try:
+        return re.sub(r'[\\/:*?"<>|]+', '_', (name or '').strip())
+    except Exception:
+        return "output"
+
 def rnd_sleep():
     time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
 
@@ -696,8 +703,8 @@ def main():
     if not user_id:
         print("[WARN] Could not auto-detect user_id; some endpoints may not work.")
 
-    # Auto output filename based on username
-    out_html = f"{username}.html"
+    # Auto output filename based on username: "<username> | Insta.html" (Windows-safe)
+    out_html = sanitize_filename(f"{username} | Insta") + ".html"
 
     # Try to embed profile pic
     profile_pic_url = profile.get("profile_pic_url_hd") or profile.get("profile_pic_url")

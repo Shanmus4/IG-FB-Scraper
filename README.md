@@ -1,12 +1,20 @@
 # Social Media Scraper
 
-A powerful tool to scrape and generate comprehensive reports from social media platforms. Currently supports Instagram, with Facebook support coming soon.
+A Python-based tool to scrape data from Instagram and Facebook profiles, generating beautiful HTML reports.
 
 ## Features
 
-- **Instagram Scraper**: Generate detailed HTML reports of Instagram profiles
-- **Dark-Themed UI**: Clean, readable interface for viewing scraped data
-- **Self-Contained**: HTML reports include all media and data
+### Instagram Scraper
+- Scrape profile information
+- Download posts, stories, and highlights
+- Get followers and following lists
+- Generate interactive HTML reports
+
+### Facebook Scraper
+- Scrape public Facebook pages and profiles
+- Extract posts, comments, and media
+- Generate interactive HTML reports
+- Export data to JSON/CSV formats
 - **Easy to Use**: Simple command-line interface
 
 ## Table of Contents
@@ -31,7 +39,7 @@ A powerful tool to scrape and generate comprehensive reports from social media p
    ```
 3. Install dependencies:
    ```bash
-   pip install -r Instagram/requirements.txt
+   pip install -r requirements.txt
    ```
 
 ## Quick Start
@@ -116,9 +124,55 @@ To find updated hashes:
 5. Look for requests to `graphql/query/`
 6. The `query_hash` parameter will contain the current hash
 
-## Facebook Scraper (Coming Soon)
+## Facebook Scraper
 
-Facebook integration is planned for a future release. This section will be updated with documentation when available.
+A simple tool to download all public posts, comments, and media from Facebook profiles and pages.
+
+### Setup
+
+1. Get your Facebook cookies:
+   - Log in to [Facebook](https://www.facebook.com)
+   - Open Developer Tools (F12)
+   - Go to Application > Storage > Cookies > https://www.facebook.com
+   - Right-click and "Copy All as Netscape cookie file"
+
+2. Create a `.env` file in the Facebook directory and paste the cookies:
+   ```
+   # Paste your Facebook cookies here
+   # Format: .facebook.com\tTRUE\t/\tTRUE\t0\t[COOKIE_NAME]\t[COOKIE_VALUE]
+   # ... (paste all cookie lines here)
+   ```
+
+3. Make sure your `.env` file is in the same directory as `facebook.py`
+
+### Usage
+
+Just run the script and enter the profile name or URL when prompted:
+
+```bash
+python Facebook/facebook.py
+```
+
+### What's Scraped
+
+- Profile information (name, about, profile picture)
+- All public posts with full text and media
+- Comments and replies
+- Embedded images and videos
+
+### Output
+
+An interactive HTML report named `[username]_facebook.html` will be created in the current directory.
+
+### Note
+
+- The scraper will automatically scroll to load all available posts
+- It may take a while for profiles with many posts
+- Make sure your account has access to the target profile
+
+### Legal Notice
+
+This tool is for educational purposes only. Use it responsibly and respect Facebook's Terms of Service. The developers are not responsible for any misuse of this tool.
 
 ## Troubleshooting
 
@@ -138,7 +192,7 @@ Facebook integration is planned for a future release. This section will be updat
 
 4. **Missing dependencies**
    - Symptoms: Import errors when running the script
-   - Solution: Run `pip install -r Instagram/requirements.txt`
+   - Solution: Run `pip install -r requirements.txt`
 
 ## Security
 
