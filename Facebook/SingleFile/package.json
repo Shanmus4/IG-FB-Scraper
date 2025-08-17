@@ -1,0 +1,24 @@
+{
+	"name": "single-file",
+	"version": "1.2.4",
+	"description": "SingleFile",
+	"author": "Gildas Lormeau",
+	"license": "AGPL-3.0-or-later",
+	"scripts": {
+		"dev": "npx rollup -c rollup.config.dev.js",
+		"build": "./build-extension.sh"
+	},
+	"type": "module",
+	"dependencies": {
+		"single-file-core": "1.5.48"
+	},
+	"devDependencies": {
+		"eslint": "^9.20.1",
+		"@rollup/plugin-node-resolve": "15.2.3",
+		"@rollup/plugin-terser": "0.4.4",
+		"rollup": "4.22.4"
+	},
+	"overrides": {
+		"terser": "^5.15.0"
+	}
+}

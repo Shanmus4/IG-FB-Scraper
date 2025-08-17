@@ -124,55 +124,86 @@ To find updated hashes:
 5. Look for requests to `graphql/query/`
 6. The `query_hash` parameter will contain the current hash
 
-## Facebook Scraper
+## Facebook Scraper (Playwright + SingleFile)
 
-A simple tool to download all public posts, comments, and media from Facebook profiles and pages.
+This scraper uses Playwright to drive a full Chromium browser and the SingleFile extension to capture complete, self-contained HTML snapshots of Facebook pages (profile, about, friends, posts, photos, etc.).
 
-### Setup
+Overview
+- The script `Facebook/facebook.py` launches a persistent Chromium profile with a small controller extension that bundles SingleFile. Playwright opens pages, scrolls/expands content heuristically, and asks the extension to produce a single-file HTML capture.
+- This approach is robust for capturing dynamic content that requires JavaScript (comments overlays, lazy-loaded media, etc.).
 
-1. Get your Facebook cookies:
-   - Log in to [Facebook](https://www.facebook.com)
-   - Open Developer Tools (F12)
-   - Go to Application > Storage > Cookies > https://www.facebook.com
-   - Right-click and "Copy All as Netscape cookie file"
+Prerequisites
+- Python 3.8+
+- Playwright Python package + browsers (Chromium recommended)
+- The `SingleFile` folder must exist in the repository (it is included). The script copies `SingleFile/lib` into a temporary extension directory at runtime.
 
-2. Create a `.env` file in the Facebook directory and paste the cookies:
-   ```
-   # Paste your Facebook cookies here
-   # Format: .facebook.com\tTRUE\t/\tTRUE\t0\t[COOKIE_NAME]\t[COOKIE_VALUE]
-   # ... (paste all cookie lines here)
-   ```
+Install dependencies
+1. Create and activate a virtual environment (PowerShell):
 
-3. Make sure your `.env` file is in the same directory as `facebook.py`
-
-### Usage
-
-Just run the script and enter the profile name or URL when prompted:
-
-```bash
-python Facebook/facebook.py
+```powershell
+python -m venv .\venv
+.\venv\Scripts\Activate.ps1
 ```
 
-### What's Scraped
+2. Install Python requirements:
 
-- Profile information (name, about, profile picture)
-- All public posts with full text and media
-- Comments and replies
-- Embedded images and videos
+```powershell
+pip install -r .\requirements.txt
+```
 
-### Output
+3. Install Playwright browser binaries (required):
 
-An interactive HTML report named `[username]_facebook.html` will be created in the current directory.
+```powershell
+python -m playwright install
+# or to install only Chromium:
+python -m playwright install chromium
+```
 
-### Note
+Cookie setup (.env)
+- The Facebook scraper authenticates by loading your browser cookies into the Playwright context. Create a `.env` file in the repository root or in the `Facebook/` folder (the script looks for `.env` at runtime). The `.env` should contain either:
 
-- The scraper will automatically scroll to load all available posts
-- It may take a while for profiles with many posts
-- Make sure your account has access to the target profile
+- A single raw cookie header line (semicolon-separated key=value pairs), for example:
 
-### Legal Notice
+```text
+mid=...; datr=...; sb=...; xs=...; c_user=...; fr=...
+```
 
-This tool is for educational purposes only. Use it responsibly and respect Facebook's Terms of Service. The developers are not responsible for any misuse of this tool.
+- Or a Netscape-format cookie dump (the script tries to be flexible). If you have the browser cookies in Developer Tools > Application > Cookies you can copy the cookie header from a request in the Network tab. The simplest method is to copy the full `Cookie` header string and paste it into `.env` as a single line.
+
+Important: Treat `.env` as secret. Do NOT commit it.
+
+How it works (brief)
+- The script builds a small controller extension in `sf_playwright_ext/` that contains the SingleFile library from `SingleFile/lib/` plus a tiny `content_script.js` and `background.html`.
+- Playwright launches Chromium with `--disable-extensions-except` and `--load-extension` pointing to the generated extension folder. The extension exposes a simple `window.postMessage` bridge so the script can ask the extension to produce a capture and receive the full HTML content.
+- The script programmatically scrolls the page, expands "See more" links and comment overlays, opens reactions dialogs, and then requests a SingleFile capture for the current page or subsection.
+
+Running the Facebook scraper (PowerShell)
+1. From the repo root, with your virtualenv active and browsers installed, run:
+
+```powershell
+python Facebook\facebook.py --url "https://www.facebook.com/<username or profile.php?id=...>" --posts-limit 20
+```
+
+2. The script will:
+- Build the controller extension under `sf_playwright_ext/` (overwrites if exists)
+- Launch a visible Chromium instance (headful) so you can observe or interact if needed
+- Load cookies into the browser context so Facebook sees you as logged in
+- Visit the profile URL, scroll, expand content, and capture snapshots with SingleFile
+
+3. Output
+- Snapshots are saved to a profile-specific snapshots folder: `<profile_id>_snapshots/`
+- A master HTML file named `{profile_id}_facebook.html` is generated at repo root and contains iframes referencing each snapshot for quick browsing.
+
+Troubleshooting and tips
+- If Playwright cannot find browsers or the script errors with browser-related exceptions, ensure you ran `python -m playwright install` successfully.
+- If captures are missing or show the Facebook login page, your cookie is missing/invalid/expired. Refresh cookies in your browser and update `.env`.
+- The extension uses Manifest v2 patterns to integrate SingleFile; if your Chromium/Playwright version changes extension APIs, you may need to update `facebook.py` extension builder (manifest contents).
+- The scraping heuristics (text matches and xpath selectors) are brittle and tuned for the current Facebook layout; occasional UI updates can break extraction. If you see elements not being expanded, update the helper patterns in `facebook.py` (functions like `click_all_see_more` and `expand_all_comments`).
+
+Security & legal
+- Only use this tool on content you are authorized to access. Respect Facebook's Terms of Service, robots, and privacy laws.
+- Delete `.env` and browser user data folder (`.playwright_user_data`) after use if you are on a shared or CI machine.
+
 
 ## Troubleshooting
 
