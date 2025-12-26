@@ -6,7 +6,12 @@ env/
 # OS
 .DS_Store
 Thumbs.db
-_pycache_/
+__pycache__/
 
 # Secrets
 .env
+*.env
+
+# App Specific (Temporary folders)
+.sf_playwright_profile/
+sf_singlefile_controller_ext/

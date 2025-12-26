@@ -32,6 +32,7 @@ import json
 import shutil
 import logging
 from pathlib import Path
+import uuid
 from typing import List, Dict, Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -40,7 +41,8 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 ROOT = Path.cwd()
 SINGLEFILE_REPO = ROOT / "SingleFile"
 EXT_DIR = ROOT / "sf_singlefile_controller_ext"
-USER_DATA_DIR = ROOT / ".sf_playwright_profile"
+# Use unique profile dir to allow parallel execution of multiple scripts
+USER_DATA_DIR = ROOT / f".sf_playwright_profile_{uuid.uuid4().hex}"
 ENV_FILE = ROOT / ".env"
 SNAPSHOT_DIR_TEMPLATE = "{profile_id}_snapshots"
 MASTER_TEMPLATE = "{profile_id}_facebook.html"
@@ -51,7 +53,7 @@ STABLE_CHECK_INTERVAL = 0.5
 STABLE_ROUNDS = 3
 STABLE_TIMEOUT = 15
 SINGLEFILE_TIMEOUT_MS = 180000  # 3 minutes for SingleFile capture
-MAX_FRIEND_SCROLLS = 10
+MAX_FRIEND_SCROLLS = 25
 MAX_FEED_SCROLLS = 6
 REMOVE_TEMP_AT_END = True  # set False if you want to inspect extension/profile directories
 
@@ -111,12 +113,15 @@ def build_controller_extension(singlefile_repo_dir: Path, ext_dir: Path):
         raise FileNotFoundError(f"SingleFile lib not found at {lib_src}. Clone the repo there.")
     shutil.copytree(lib_src, ext_dir / "lib")
 
-    # background.html to load background scripts (keeps extension valid)
-    background_html = """<!doctype html><html><head><meta charset="utf-8"></head><body>
-<script src="lib/chrome-browser-polyfill.js"></script>
-<script src="lib/single-file-background.js"></script>
-</body></html>"""
-    (ext_dir / "background.html").write_text(background_html, encoding="utf-8")
+    # background.js (Service Worker) for Manifest V3
+    background_js = """
+try {
+  importScripts('lib/chrome-browser-polyfill.js', 'lib/single-file-background.js');
+} catch (e) {
+  console.error(e);
+}
+"""
+    (ext_dir / "background.js").write_text(background_js, encoding="utf-8")
 
     # content script: listens for window.postMessage requests from page and calls extension.getPageData
     content_script = r"""
@@ -148,7 +153,7 @@ def build_controller_extension(singlefile_repo_dir: Path, ext_dir: Path):
     (ext_dir / "content_script.js").write_text(content_script, encoding="utf-8")
 
     manifest = {
-        "manifest_version": 2,
+        "manifest_version": 3,
         "name": "SingleFile Controller for Playwright",
         "version": "1.0",
         "description": "Controller bundling SingleFile lib and exposing capture bridge",
@@ -176,9 +181,15 @@ def build_controller_extension(singlefile_repo_dir: Path, ext_dir: Path):
                 "all_frames": False
             }
         ],
-        "background": {"page": "background.html", "persistent": False},
-        "permissions": ["activeTab", "<all_urls>"],
-        "web_accessible_resources": ["lib/single-file-hooks-frames.js"]
+        "background": {"service_worker": "background.js"},
+        "permissions": ["activeTab", "scripting"],
+        "host_permissions": ["<all_urls>"],
+        "web_accessible_resources": [
+            {
+                "resources": ["lib/single-file-hooks-frames.js"],
+                "matches": ["<all_urls>"]
+            }
+        ]
     }
     (ext_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     logger.info("Controller extension created")
@@ -206,14 +217,31 @@ def wait_for_page_stable(page, check_interval=STABLE_CHECK_INTERVAL, stable_roun
             return False
         time.sleep(check_interval)
 
-def auto_scroll_page(page, max_rounds=6, pause=1.0):
+def auto_scroll_page(page, max_rounds=6, pause=1.0, step_callback=None):
     prev = -1
+    no_change_count = 0
+    max_no_change = 10
+
     for i in range(max_rounds):
         page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(pause)
+        
+        # Sleep in chunks to allow callback execution
+        waited = 0.0
+        chunk = 0.2
+        while waited < pause:
+            time.sleep(chunk)
+            waited += chunk
+            if step_callback:
+                step_callback()
+        
         cur = page.evaluate("() => document.body.scrollHeight")
         if cur == prev:
-            return
+            no_change_count += 1
+            if no_change_count >= max_no_change:
+                return
+        else:
+            no_change_count = 0
+            
         prev = cur
 
 def click_expandors(page, patterns=None, max_iter=6):
@@ -256,21 +284,52 @@ def setup_page_result_listener(page):
 }
 """)
 
-def request_singlefile_capture_and_wait(page, capture_id: str, timeout_ms: int = SINGLEFILE_TIMEOUT_MS) -> Dict:
-    logger.info("Requesting SingleFile capture: %s", capture_id)
+def trigger_singlefile_capture(page, capture_id: str):
+    logger.info("Triggering SingleFile capture (background): %s", capture_id)
     setup_page_result_listener(page)
+    # Clear old results
     page.evaluate(f"() => {{ if (window.__singlefile_results) delete window.__singlefile_results['{capture_id}']; }}")
-    # post request to extension content script
+    # Post message
     page.evaluate(f"""
-() => {{
-  window.postMessage({{ source: 'singlefile-controller-request', id: '{capture_id}', options: {{ removeHiddenElements: true, compressHTML: true, blockVideos: false }} }}, '*');
-}}
-""")
+    () => {{
+      window.postMessage({{ 
+        source: 'singlefile-controller-request', 
+        id: '{capture_id}', 
+        options: {{ 
+            removeHiddenElements: true,
+            compressHTML: true,
+            blockScripts: true,
+            blockAudios: true,
+            blockVideos: true,
+            removeUnusedStyles: true,
+            removeUnusedFonts: true,
+            removeAlternativeImages: true,
+            removeAlternativeFonts: true,
+            removeAlternativeMedias: true,
+            groupDuplicateImages: true,
+            loadDeferredImages: true,
+            maxResourceSizeEnabled: false,
+            blockMixedContent: false
+        }} 
+      }}, '*');
+    }}
+    """)
+
+def collect_singlefile_result(page, capture_id: str):
+    # Check if result exists. If not, returns None immediately (non-blocking check logic, but we usually want to wait if we call this)
+    # This specific helper is designed to Poll or Wait. 
+    # For the pipeline, we might want a non-blocking "check".
+    res = page.evaluate(f"() => window.__singlefile_results && window.__singlefile_results['{capture_id}']")
+    return res
+
+def request_singlefile_capture_and_wait(page, capture_id: str, timeout_ms: int = SINGLEFILE_TIMEOUT_MS) -> Dict:
+    trigger_singlefile_capture(page, capture_id)
     try:
         page.wait_for_function(f"() => window.__singlefile_results && window.__singlefile_results['{capture_id}'] !== undefined", timeout=timeout_ms)
     except PWTimeout:
         raise TimeoutError(f"Timed out waiting for SingleFile capture id {capture_id}")
-    res = page.evaluate(f"() => window.__singlefile_results['{capture_id}']")
+    
+    res = collect_singlefile_result(page, capture_id)
     if not res:
         raise RuntimeError("Empty SingleFile response for " + capture_id)
     if res.get("error"):
@@ -340,13 +399,135 @@ def find_anchor_href_by_href_pattern(page, pattern: str) -> Optional[str]:
 
 # ---------------- Save snapshot to disk ----------------
 def save_snapshot_content(res: Dict, out_dir: Path, profile_id: str, short_name: str) -> Path:
-    fn = res.get("filename") or f"{profile_id}_{short_name}.html"
+    # Force our own robust naming scheme
+    # timestamp to ensure uniqueness if multiple runs or similar items
+    fn = f"{profile_id}_{short_name}.html"
+    # sanitize
     fn = re.sub(r"[^\w\-_\. ]", "_", fn)[:200]
     out_path = out_dir / fn
     content = res.get("content", "")
+    
+    # Ensure extension is .html
+    if not out_path.name.lower().endswith(".html"):
+        out_path = out_path.with_suffix(".html")
+        
     out_path.write_text(content, encoding="utf-8")
-    logger.info("Saved snapshot %s", out_path)
+    logger.info("Saved snapshot %s", out_path.name)
     return out_path
+
+def sanitize_url_to_folder(url: str) -> str:
+    # strip protocol
+    s = re.sub(r'https?://(www\.)?', '', url)
+    # replace illegal chars
+    s = re.sub(r'[\\/:*?"<>|]', '_', s)
+    return s.strip()
+
+def expand_reactions_modal(page):
+    """
+    Attempt to click the reactions count (e.g., the number '3') to open the 'People who reacted' modal,
+    then scroll that modal to load more users.
+    """
+    logger.info("Attempting to expand reactions modal...")
+    try:
+        found = False
+        
+        # Strategy: Click the numeric text itself. 
+        # The user provided screenshot shows "LikeIcon HeartIcon 3". 
+        # We want to click the "3".
+        
+        try:
+            # Execute JS to find the specific numeric element
+            page.evaluate("""() => {
+                // Helper to check visibility
+                function isVisible(elem) {
+                    if (!(elem instanceof Element)) return false;
+                    const style = getComputedStyle(elem);
+                    if (style.display === 'none') return false;
+                    if (style.visibility !== 'visible') return false;
+                    if (style.opacity === '0') return false;
+                    return true;
+                }
+
+                // 1. Find all visible elements containing just digits (and maybe K/M suffixes)
+                // We restrict search to the 'feedback' context if possible, but strict context is hard to guess.
+                // We search all spans/divs.
+                const elements = document.querySelectorAll('span, div[role="button"]');
+                
+                for (const el of elements) {
+                    const text = el.innerText ? el.innerText.trim() : "";
+                    
+                    // Match exact number "3", or "1.5K", "You and 4 others"
+                    // The screenshot shows just "3". 
+                    // Regex: Start with digit, optional K/M, or "You and..."
+                    if (/^([0-9.,]+[KMB]?|You and.*)/.test(text)) {
+                        
+                        // Heuristic: The element should be near a reaction icon.
+                        // Reaction icons usually have aria-label="Like", "Love", etc. or typical emojis.
+                        // We check if a sibling or parent's sibling contains an image/icon.
+                        
+                        // Check if this specific element is the one we want.
+                        // In the screenshot, the "3" is adjacent to the icons.
+                        // Often text is within a span that has a click listener.
+                        
+                        if (isVisible(el)) {
+                            // Check ancestors for role='button' or generic clickable wrapper
+                            const clickable = el.closest('[role="button"]') || el;
+                            if (clickable) {
+                                clickable.click();
+                                return; // Stop after first match? 
+                                // In a photo viewer, there's usually only one main feedback bar active/visible.
+                            }
+                        }
+                    }
+                }
+            }""")
+            
+            # We assume the click bridged the gap. Now wait for dialog.
+            page.wait_for_selector('div[role="dialog"]', state="visible", timeout=3000)
+            logger.info("Reactions modal opened.")
+            
+            # Scroll the dialog content until end
+            # We'll scroll up to 50 times or until height stops increasing
+            prev_height = 0
+            same_height_count = 0
+            
+            for i in range(50): 
+                # Returns [current_scroll_top, scroll_height]
+                scroll_stats = page.evaluate("""() => {
+                    const dialog = document.querySelector('div[role="dialog"]');
+                    if (!dialog) return [0, 0];
+                    
+                    const scrollables = Array.from(dialog.querySelectorAll('*')).filter(e => e.scrollHeight > e.clientHeight);
+                    if (scrollables.length > 0) {
+                         const target = scrollables.reduce((a, b) => a.scrollHeight > b.scrollHeight ? a : b);
+                         target.scrollTop = target.scrollHeight;
+                         return [target.scrollTop, target.scrollHeight];
+                    }
+                    return [0, 0];
+                }""")
+                
+                curr_scrollTop, curr_height = scroll_stats
+                if curr_height == 0:
+                    break
+                
+                logger.debug(f"Reaction scroll {i+1}: height={curr_height}")
+                
+                if curr_height == prev_height:
+                    same_height_count += 1
+                    if same_height_count >= 3: # Stop if height hasn't changed for 3 iterations
+                        break
+                else:
+                    same_height_count = 0
+                
+                prev_height = curr_height
+                time.sleep(1.5) # Wait for network load
+                
+        except Exception:
+            # If the numeric click didn't work or dialog didn't open
+            pass
+
+    except Exception as e:
+        logger.debug("expand_reactions_modal error: %s", e)
 
 # ---------------- Orchestrator (deterministic flow) ----------------
 def run(profile_url: str):
@@ -359,152 +540,281 @@ def run(profile_url: str):
 
     build_controller_extension(SINGLEFILE_REPO, EXT_DIR)
 
+    # Force cleanup of profile dir to reset window state preferences
+    if USER_DATA_DIR.exists():
+        try:
+            shutil.rmtree(USER_DATA_DIR)
+        except Exception as e:
+            logger.warning("Could not clean old profile dir: %s", e)
+
     # Launch persistent Chromium so extension loads
     logger.info("Launching Chromium persistent context with controller extension")
     Path(USER_DATA_DIR).mkdir(parents=True, exist_ok=True)
-    args = [f"--disable-extensions-except={str(EXT_DIR)}", f"--load-extension={str(EXT_DIR)}"]
+    args = [
+        f"--disable-extensions-except={str(EXT_DIR)}", 
+        f"--load-extension={str(EXT_DIR)}",
+        "--window-size=1920,1080",
+        "--window-position=0,0"
+    ]
     with sync_playwright() as pw:
-        context = pw.chromium.launch_persistent_context(str(USER_DATA_DIR), headless=False, args=args)
-        page = context.new_page()
+        context = pw.chromium.launch_persistent_context(str(USER_DATA_DIR), headless=False, args=args, viewport={"width": 1920, "height": 1080})
+        
+        # Use the default page created by launch_persistent_context if it exists to respect window args
+        if context.pages:
+            first_page = context.pages[0]
+        else:
+            first_page = context.new_page()
 
         # Inject cookies
         try:
             context.add_cookies(cookies)
-            logger.info("Injected cookies into context")
+            logger.info("Cookies injected")
         except Exception as e:
-            logger.warning("context.add_cookies failed: %s; will retry via page navigation", e)
-            try:
-                page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=30000)
-                for c in cookies:
-                    try:
-                        context.add_cookies([c])
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            logger.warning("Cookie injection warning: %s", e)
+        # ---------------- Initial Setup ----------------
+        # Prepare base URL for strict navigation (remove trailing slash and existing sk params)
+        base_profile_url = profile_url.rstrip("/")
+        # Remove existing sk= param to prevent conflicts (e.g. if user pasted a photos link)
+        base_profile_url = re.sub(r'[&?]sk=[^&]*', '', base_profile_url)
+        
+        def construct_section_url(base: str, section: str) -> str:
+            # section e.g. "photos", "about", "friends"
+            if "profile.php" in base:
+                if "?" in base:
+                    return f"{base}&sk={section}"
+                else:
+                    return f"{base}?sk={section}"
+            else:
+                return f"{base}/{section}"
 
-        # Visit profile main
-        logger.info("Visiting profile: %s", profile_url)
-        page.goto(profile_url, wait_until="load", timeout=60000)
-        time.sleep(WAIT_AFTER_NAV)
-        wait_for_page_stable(page)
-        click_expandors(page)
-        # capture profile main
-        try:
-            res = request_singlefile_capture_and_wait(page, "profile_main", timeout_ms=SINGLEFILE_TIMEOUT_MS)
-        except Exception as e:
-            logger.exception("SingleFile capture for profile_main failed: %s", e)
-            res = {"content": page.content(), "filename": "profile_main_fallback.html", "title": "profile_fallback"}
-        # detect profile id
-        html = page.content()
-        profile_id = None
-        m = re.search(r'"userID"\s*:\s*"(\d+)"', html)
+        # Profile ID detection (Simple heuristics for folder naming)
+        profile_id = "fb_profile"
+        m = re.search(r"id=(\d+)", base_profile_url)
         if m:
             profile_id = m.group(1)
         else:
-            m2 = re.search(r'profile_owner[^\d]*(\d+)', html) or re.search(r'entity_id[^\d]*(\d+)', html)
-            if m2:
-                profile_id = m2.group(1)
-        if not profile_id:
-            m3 = re.search(r"profile\.php\?id=(\d+)", profile_url)
-            if m3:
-                profile_id = m3.group(1)
-        if not profile_id:
-            profile_id = "unknown_profile"
-            logger.warning("Could not detect profile id; using %s", profile_id)
+            # maybe username? facebook.com/username
+            clean = base_profile_url.split("?")[0]
+            parts = [p for p in clean.split("/") if p]
+            if parts: profile_id = parts[-1]
+            
+        # Output Structure: Facebook/{sanitized_url}/
+        folder_name = sanitize_url_to_folder(profile_url)
+        report_root = ROOT / folder_name
+        report_root.mkdir(parents=True, exist_ok=True)
+        
+        # Snapshots go into a subfolder
+        snapshot_dir = report_root / "snapshots"
+        snapshot_dir.mkdir(exist_ok=True)
+        # ---------------- Task Definitions ----------------
+        tasks = []
+        
+        # Task 1: Main Profile
+        tasks.append({
+            "key": "profile_main",
+            "url": profile_url,
+            "scroll": 10
+        })
 
-        out_root = Path(SNAPSHOT_DIR_TEMPLATE.format(profile_id=profile_id))
-        out_root.mkdir(parents=True, exist_ok=True)
+        # Task 2: About Subsections
+        about_subsections = [
+            ("about_intro", "about"),
+            ("about_work", "directory_work"), 
+            ("about_education", "directory_education"),
+            ("about_personal_details", "directory_personal_details")
+        ]
+        for key, sk_val in about_subsections:
+            # User requested main about section to scroll till end. Others no scroll.
+            s_rounds = 25 if key == "about_intro" else 0
+            tasks.append({
+                "key": key,
+                "url": construct_section_url(base_profile_url, sk_val),
+                "scroll": s_rounds
+            })
 
-        save_snapshot_content(res, out_root, profile_id, "profile_main")
+        # Task 3: Friends
+        tasks.append({
+            "key": "friends",
+            "url": construct_section_url(base_profile_url, "friends"),
+            "scroll": MAX_FRIEND_SCROLLS
+        })
 
-        # Helper to visit by finding links on the profile or current page, and capture deterministically
-        def visit_and_capture_by_text_or_pattern(page, text_keywords: List[str], href_pattern: Optional[str], fallback_construct: Optional[str], capture_suffix: str, scroll_rounds=0):
-            """
-            Try to find a link by visible text keywords first on current page; if not found try href_pattern
-            If both fail and fallback_construct is provided, use it.
-            """
-            # Try visible link first on current document
-            href = find_profile_link_target(page, text_keywords) if text_keywords else None
-            if not href and href_pattern:
-                href = find_anchor_href_by_href_pattern(page, href_pattern)
-            if not href and fallback_construct:
-                href = fallback_construct
-            if not href:
-                logger.warning("Unable to find target for %s (keywords=%s pattern=%s). Skipping.", capture_suffix, text_keywords, href_pattern)
-                return None
-            logger.info("Visiting target for %s -> %s", capture_suffix, href)
-            page.goto(href, wait_until="load", timeout=60000)
-            time.sleep(WAIT_AFTER_NAV)
-            if scroll_rounds and scroll_rounds > 0:
-                auto_scroll_page(page, max_rounds=scroll_rounds, pause=1.0)
-            click_expandors(page)
-            wait_for_page_stable(page)
+        # Task 4: Photos Grid
+        tasks.append({
+            "key": "photos_grid",
+            "url": construct_section_url(base_profile_url, "photos_by"),
+            "scroll": 25
+        })
+
+        # Task 5: Videos
+        tasks.append({
+            "key": "videos",
+            "url": construct_section_url(base_profile_url, "videos"),
+            "scroll": 25
+        })
+
+        # Task 6: Reels
+        tasks.append({
+            "key": "reels",
+            "url": construct_section_url(base_profile_url, "reels"),
+            "scroll": 25
+        })
+        
+        # ---------------- Pipeline Execution ----------------
+        pending_captures = []
+
+        def check_and_collect_pending(force_wait=False):
+            active_list = []
+            for item in pending_captures:
+                p = item['page']
+                key = item['key']
+                
+                try:
+                    res = collect_singlefile_result(p, key)
+                    if res:
+                        save_snapshot_content(res, snapshot_dir, profile_id, key)
+                        if p != first_page: # Don't close the main first page until very end? Or just close it.
+                            try: p.close()
+                            except: pass
+                        continue
+                    else:
+                        if force_wait:
+                            logger.info("Waiting for background capture: %s", key)
+                            try:
+                                p.wait_for_function(f"() => window.__singlefile_results && window.__singlefile_results['{key}'] !== undefined", timeout=SINGLEFILE_TIMEOUT_MS)
+                                res = collect_singlefile_result(p, key)
+                                save_snapshot_content(res, snapshot_dir, profile_id, key)
+                            except Exception as e:
+                                logger.error("Failed waiting for %s: %s", key, e)
+                            if p != first_page:
+                                try: p.close()
+                                except: pass
+                            continue
+                        else:
+                            active_list.append(item)
+                except Exception as e:
+                    logger.error("Error checking %s: %s", key, e)
+                    try: p.close() 
+                    except: pass
+            
+            pending_captures[:] = active_list
+
+        
+        # Iterate Tasks
+        for i, task in enumerate(tasks):
+            t_key = task['key']
+            t_url = task['url']
+            t_scroll = task['scroll']
+            
+            logger.info("=== Processing Task %d/%d: %s ===", i+1, len(tasks), t_key)
+            
+            if i == 0:
+                page = first_page
+            else:
+                page = context.new_page()
+            
             try:
-                res = request_singlefile_capture_and_wait(page, capture_suffix, timeout_ms=SINGLEFILE_TIMEOUT_MS)
+                logger.info("Navigating %s...", t_url)
+                page.goto(t_url, wait_until="domcontentloaded", timeout=60000)
+                time.sleep(WAIT_AFTER_NAV)
+                
+                if t_key == "profile_main":
+                    wait_for_page_stable(page)
+                    logger.info("Scrolling...")
+                    auto_scroll_page(page, max_rounds=t_scroll, step_callback=lambda: check_and_collect_pending(force_wait=False))
+                    try:
+                        page.keyboard.press("Escape")
+                        time.sleep(0.5)
+                        page.keyboard.press("Escape")
+                    except: pass
+                else:
+                    wait_for_page_stable(page)
+                    if t_scroll > 0:
+                        logger.info("Scrolling...")
+                        auto_scroll_page(page, max_rounds=t_scroll, step_callback=lambda: check_and_collect_pending(force_wait=False))
+                
+                logger.info("Triggering capture for %s...", t_key)
+                trigger_singlefile_capture(page, t_key)
+                
+                pending_captures.append({"page": page, "key": t_key, "start_time": time.time()})
+                
+                # Maintenance
+                check_and_collect_pending(force_wait=False)
+                
             except Exception as e:
-                logger.exception("SingleFile capture %s failed: %s. Falling back to page.content()", capture_suffix, e)
-                res = {"content": page.content(), "filename": f"{capture_suffix}_fallback.html", "title": capture_suffix}
-            return save_snapshot_content(res, out_root, profile_id, capture_suffix)
+                logger.error("Task %s failed: %s", t_key, e)
+                try: page.close()
+                except: pass
 
-        # 1) About (try About link text)
-        visit_and_capture_by_text_or_pattern(page, ["About"], "/about", profile_url.rstrip("/") + "/about", "about_overview", scroll_rounds=1)
-        visit_and_capture_by_text_or_pattern(page, ["Contact and basic info", "Contact info", "Contact"], "contact_and_basic_info", None, "about_contact_and_basic_info", scroll_rounds=1)
-        visit_and_capture_by_text_or_pattern(page, ["Family and relationships", "Family"], "family_and_relationships", None, "about_family_and_relationships", scroll_rounds=1)
+        logger.info("All tasks initiated. Waiting for remaining %d captures...", len(pending_captures))
+        check_and_collect_pending(force_wait=True)
 
-        # 2) Friends
-        visit_and_capture_by_text_or_pattern(page, ["Friends"], "/friends", profile_url.rstrip("/") + "/friends", "friends", scroll_rounds=MAX_FRIEND_SCROLLS)
-
-        # 3) Photos (by / uploads)
-        visit_and_capture_by_text_or_pattern(page, ["Photos"], "/photos", profile_url.rstrip("/") + "/photos", "photos_by", scroll_rounds=MAX_FEED_SCROLLS)
-        # 4) Photos tagged (if available)
-        visit_and_capture_by_text_or_pattern(page, ["Photos of", "Tagged"], "photos_tagged", None, "photos_of", scroll_rounds=MAX_FEED_SCROLLS)
-
-        # 5) Videos
-        visit_and_capture_by_text_or_pattern(page, ["Videos"], "/videos", profile_url.rstrip("/") + "/videos", "videos_by", scroll_rounds=MAX_FEED_SCROLLS)
-        visit_and_capture_by_text_or_pattern(page, ["Videos of", "Tagged videos"], "videos_tagged", None, "videos_of", scroll_rounds=MAX_FEED_SCROLLS)
 
         # create master index
         logger.info("Creating master index HTML")
-        snapshots = sorted([p for p in out_root.iterdir() if p.is_file() and p.suffix == ".html"])
-        master_path = ROOT / MASTER_TEMPLATE.format(profile_id=profile_id)
+        snapshots = sorted([p for p in snapshot_dir.iterdir() if p.is_file() and p.suffix == ".html"])
+        master_path = report_root / "index.html"
+        
+        # Categorize snapshots
+        categories = {
+            "Main Profile": [],
+            "About & Info": [],
+            "Friends": [],
+            "Photos": [],
+            "Videos": [],
+            "Likes, Check-ins, Events": [],
+            "Other": []
+        }
+        
+        for s in snapshots:
+            name = s.name.lower()
+            if "profile_main" in name:
+                categories["Main Profile"].append(s)
+            elif "about" in name:
+                categories["About & Info"].append(s)
+            elif "friends" in name:
+                categories["Friends"].append(s)
+            elif "photo" in name:
+                categories["Photos"].append(s)
+            elif "video" in name or "reels" in name:
+                categories["Videos"].append(s)
+            else:
+                categories["Other"].append(s)
+        
         with open(master_path, "w", encoding="utf-8") as mf:
             mf.write("<!doctype html>\n<html>\n<head>\n<meta charset='utf-8'>\n")
             mf.write(f"<title>Facebook export {profile_id}</title>\n")
-            mf.write("<style>body{font-family:Arial,Helvetica,sans-serif;margin:18px} iframe{width:100%;height:720px;border:1px solid #ddd;margin-bottom:18px}</style>\n")
+            mf.write("<style>body{font-family:Arial,Helvetica,sans-serif;margin:20px;line-height:1.6} h1{color:#1877f2} h2{border-bottom:1px solid #ccc;padding-bottom:5px;margin-top:30px} a{text-decoration:none;color:#333;font-size:16px} a:hover{color:#1877f2;text-decoration:underline} ul{list-style-type:none;padding:0} li{margin:8px 0}</style>\n")
             mf.write("</head>\n<body>\n")
             mf.write(f"<h1>Export for profile {profile_id}</h1>\n")
-            for s in snapshots:
-                rel = os.path.relpath(str(s), start=str(master_path.parent))
-                mf.write(f"<details>\n<summary style='font-size:16px;padding:8px'>{s.name}</summary>\n<iframe src=\"{rel}\" loading='lazy'></iframe>\n</details>\n")
+            mf.write(f"<div>Source: <a href='{profile_url}' target='_blank'>{profile_url}</a></div>\n")
+            
+            for cat_name, items in categories.items():
+                if not items: continue
+                mf.write(f"<h2>{cat_name}</h2>\n<ul>\n")
+                for s in items:
+                    rel = f"snapshots/{s.name}"
+                    label = s.name.replace(".html", "").replace("_", " ").title()
+                    mf.write(f"<li><a href='{rel}' target='_blank'>📄 {label}</a></li>\n")
+                mf.write("</ul>\n")
+                
             mf.write("</body>\n</html>\n")
         logger.info("Master index created at %s", master_path)
 
         # close context
-        logger.info("Closing context and browser")
-        context.close()
-
-    # cleanup ext and profile folders if desired
-    if REMOVE_TEMP_AT_END:
         try:
-            if EXT_DIR.exists():
-                shutil.rmtree(EXT_DIR)
-            if USER_DATA_DIR.exists():
-                shutil.rmtree(USER_DATA_DIR)
-            logger.info("Removed temporary extension and profile folders")
-        except Exception as e:
-            logger.warning("Cleanup error: %s", e)
+            context.close()
+        except:
+            pass
+            
+        if REMOVE_TEMP_AT_END:
+            try:
+                shutil.rmtree(EXT_DIR, ignore_errors=True)
+                shutil.rmtree(USER_DATA_DIR, ignore_errors=True)
+            except:
+                pass
 
-    logger.info("Done. Snapshots in %s and master %s", out_root, master_path)
-
-# ---------------- Entry point ----------------
 if __name__ == "__main__":
-    try:
-        profile_url = input("Paste full Facebook profile URL (www.facebook.com/...) and press Enter: ").strip()
-        if not profile_url:
-            print("Profile URL cannot be empty. Exiting.")
-            raise SystemExit(1)
-        run(profile_url)
-    except Exception as e:
-        logger.exception("Fatal error: %s", e)
-        raise
+    url = input("Facebook Profile URL: ").strip()
+    if url:
+        run(url)
